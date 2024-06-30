@@ -44,16 +44,6 @@ class TextAttribute(Enum):
         UNDERLINE  = curses.A_UNDERLINE
         VERTICAL   = curses.A_VERTICAL
 
-class Color(Enum):
-        BLACK   = curses.COLOR_BLACK
-        BLUE    = curses.COLOR_BLUE
-        CYAN    = curses.COLOR_CYAN
-        GREEN   = curses.COLOR_GREEN
-        MAGENTA = curses.COLOR_MAGENTA
-        RED     = curses.COLOR_RED
-        WHITE   = curses.COLOR_WHITE
-        YELLOW  = curses.COLOR_YELLOW
-
 class SpecialKey(Enum):
         A1        = curses.KEY_A1
         A3        = curses.KEY_A3
@@ -223,6 +213,11 @@ class SpecialKey(Enum):
                 else:
                         return False
 
+# colorpair 在 Screen.init 中初始化
+class Highlight(Enum):
+        FUNCTION = 1
+        STRING = 2
+
 def get_key_name(key):
         return curses.keyname(key)
 
@@ -334,13 +329,19 @@ class Window:
                 window.__curses_window = curses_window
                 return window
 
-        def put(self, text, x = 0, y = 0, refresh=True):
+        def put(self, text, x = 0, y = 0, refresh=True, move_cur=True):
                 if type(text) == list:
                         text = "".join(text)
+
+                if not move_cur:
+                        cur_x, cur_y = self.len_to_xy(self.__display_point)
 
                 self.__curses_window.clear()
                 self.__curses_window.addstr(y, x, text)
                 self.__content = text
+
+                if not move_cur:
+                        self.move_to(cur_x, cur_y, refresh=False)
 
                 if refresh == True:
                         self.__curses_window.refresh()
@@ -356,15 +357,23 @@ class Window:
                 self.__real_point = 0
                 self.__display_point = 0
 
-        def add(self, str_or_can_be_str: str | Any):
+        def add(self,
+                str_or_can_be_str: str | Any,
+                color: Highlight = None,
+                refresh=True):
                 str_ = str(str_or_can_be_str)
                 self.__content       += str_
                 self.__display_point += str_display_len(str_)
                 self.__real_point    += len(str_)
-                self.__curses_window.addstr(str_)
-                self.refresh()
+                
+                if color == None:
+                        self.__curses_window.addstr(str_)
+                else:
+                        self.__curses_window.addstr(str_, curses.color_pair(color.value))
+                if refresh:
+                        self.refresh()
 
-        def set_real_point(self, real_point):
+        def set_point(self, real_point):
                 """
                 该函数假定光标永远在已写入的范围内
                 """
@@ -373,7 +382,7 @@ class Window:
                 else:
                         self.__real_point = real_point
 
-                self.__display_point = str_display_len(self.__content)
+                self.__display_point = str_display_len(self.__content[:real_point])
 
                 x, y = self.len_to_xy(self.__display_point)
                 self.__curses_window.move(y, x)
@@ -388,7 +397,7 @@ class Window:
                                 self.__content[self.__real_point + len_ : self.__real_point]
                         )
 
-        def add_real_point(self, len_):
+        def add_point(self, len_):
                 """
                 该函数假定光标永远在已写入的范围内
                 """
@@ -406,7 +415,7 @@ class Window:
         def get_display_point(self):
                 return self.__display_point
 
-        def get_real_point(self):
+        def get_point(self):
                 return self.__real_point
 
         def refresh(self):
@@ -421,8 +430,11 @@ class Window:
 
         def get_content(self):
                 return self.__content
+        
+        def get_max_capacity(self):
+                return self.get_width() * self.get_height()
 
-        def get_content_list(self):
+        def get_content_chlist(self):
                 return list(self.get_content())
 
         def len_to_xy(self, len_):
@@ -444,37 +456,14 @@ class Window:
                 else:
                         return len_
 
-        def __get_utf8char(self, startch):
-                if startch & 0b10000000 == 0:  # ASCII char
-                        return chr(startch)
-                elif startch & 0b11100000 == 0b11000000:  # UTF-8 2bytes char
-                        byte2 = self.__curses_window.getch()
-                        utf8ch = (startch << 8) | byte2
-                        return str(int.to_bytes(utf8ch, length=2), encoding="utf8")
-                elif startch & 0b11110000 == 0b11100000:  # UTF-8 3bytes char
-                        byte2 = self.__curses_window.getch()
-                        byte3 = self.__curses_window.getch()
-                        utf8ch = (((startch << 8) | byte2)
-                                                        << 8) | byte3
-                        return str(int.to_bytes(utf8ch, length=3), encoding="utf8")
-                elif startch & 0b11111000 == 0b11110000:  # UTF-8 4bytes char
-                        byte2 = self.__curses_window.getch()
-                        byte3 = self.__curses_window.getch()
-                        byte4 = self.__curses_window.getch()
-                        utf8ch = (((((startch << 8) | byte2)
-                                                        << 8) | byte3) 
-                                                                << 8) | byte4
-                        return str(int.to_bytes(utf8ch, length=4), encoding="utf8")
-
         def wait_char(self) -> str | int | SpecialKey:
                 """
                 这会输出一个 UTF-8 编码的字符或一个控制字符
-                如果输入不合法，则输出 \ufffd (�)
                 """
-                ch = self.__curses_window.getch()
+                ch = self.__curses_window.get_wch()
 
-                if 32 <= ch <= 126 or (ch > 127 and ch < 256):  # ASCII 或 UTF-8 字符
-                        return self.__get_utf8char(ch)
+                if type(ch) == str:
+                        return ch
                 else:
                         # 如果 ch 是 SpecialKey ，返回对应的 SpecialKey 名称
                         # 如果不是，则返回对应的值
@@ -490,9 +479,13 @@ class Window:
                 contentlist.insert(index, str(str_or_can_be_str))
                 self.put("".join(contentlist), 0, 0)
 
-        def move_to(self, x, y):
+        def move_to(self, x, y, refresh=True):
+                '''
+                仅移动鼠标，而不包括 points
+                '''
                 self.__curses_window.move(y, x)
-                self.refresh()
+                if refresh:
+                        self.refresh()
 
 
 __STDSCR = None
@@ -506,9 +499,21 @@ class Screen:
                 __STDSCR = curses.initscr()
                 curses.noecho()         # 底层开启无回显模式，我们会再套一层
                 curses.cbreak()         # 同理，我们不需要默认按回车
+                curses.start_color()
                 __STDSCR.keypad(True)    # 让 curses 处理特殊按键
                 __STDSCR.clear()
 
+                curses.init_pair(
+                        Highlight.FUNCTION.value,
+                        curses.COLOR_GREEN,
+                        curses.COLOR_BLACK
+                        )
+                
+                curses.init_pair(
+                        Highlight.STRING.value,
+                        curses.COLOR_YELLOW,
+                        curses.COLOR_BLACK
+                        )
         def exit():
                 curses.echo()
                 curses.nocbreak()

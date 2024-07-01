@@ -125,7 +125,8 @@ def crop_precolored_content(content: PrecoloredContent, maxwidth: int, nlines: i
 
 def process_content(
                 content: str,
-                last_time_content: PrecoloredContent) -> PrecoloredContent:
+                last_time_content: PrecoloredContent,
+                multilines: bool) -> PrecoloredContent:
         redirected_stdio = init_stringio() # 把 eval 的 stdio 重定向到这里
 
         outputwindow.clear()
@@ -136,7 +137,11 @@ def process_content(
                 if preprocessed == None:
                         result = ''
                 else:
-                        result = str(eval(preprocessed, {}, LOCALS))
+                        if multilines == True:
+                                exec(preprocessed, {}, LOCALS)
+                                result = str(LOCALS.get('_', None))
+                        else:
+                                result = str(eval(preprocessed, {}, LOCALS))
         except Exception as e:
                 precolored_output.append((TokenType.FUNCTION, '! ' + str(e) + '\n'))
         else:
@@ -161,22 +166,52 @@ class VariableVisitor(ast.NodeVisitor):
                 # 将变量名添加到集合中
                 if hasattr(builtins, node.id):
                         self.tokens.append(
-                                (node.col_offset, TokenType.FUNCTION, node.id))
+                                (node.lineno, 
+                                 node.col_offset,
+                                 TokenType.FUNCTION,
+                                 node.id))
         
         def visit_Constant(self, node):
                 if type(node.value) == str:
                         self.tokens.append(
-                                (node.col_offset + 1, TokenType.STRING, node.value))
-        
+                                (node.lineno,
+                                 node.col_offset + 1,
+                                 TokenType.STRING,
+                                 node.value))
+
+def line_col_to_len(content, lctoken, offset):
+        (line, col, tt, value) = lctoken
+        nowlen = 0
+        for i in range(0, line - 1):
+                nowlen += len(content[i]) + 1 # 包含换行符
+        return nowlen + col + offset
 
 def parse_tokens(content: str) -> list[tuple[int, TokenType, str]]:
+        splitted_content = content.splitlines()
+
+        # 删除反斜杠
+        if splitted_content[0][0] == '\\':
+                splitted_content[0] = splitted_content[0][1:]
+                offset = 1
+        else:
+                offset = 0
+        
+        if splitted_content[-1][-1] == '\\':
+                splitted_content[-1] = splitted_content[-1][:-1]
+
         try:
-                tree = ast.parse(content)
+                tree = ast.parse('\n'.join(splitted_content))
         except SyntaxError as e:
                 raise e
         visitor = VariableVisitor()
         visitor.visit(tree)
-        return visitor.tokens
+        linear_tokens = []
+        for e in visitor.tokens:
+                linear_tokens.append(
+                        (line_col_to_len(splitted_content, e, offset),
+                         e[2],
+                         e[3]))
+        return linear_tokens
 
 def precolor_input_content(
                 content: str,
@@ -194,6 +229,7 @@ def precolor_input_content(
         return precolored_content
 
 def highlight_from_content(content: str):
+        
         try:
                 tokens = parse_tokens(content)
         except:
@@ -215,8 +251,9 @@ def highlight():
         inputwindow.set_point(real_point)       # 清除输出字符时对鼠标指针的所有副作用
 
 current_outputwindow_content: PrecoloredContent = []
-last_contents = []
+last_contents: list[str] = []
 last_contents_point = 0
+allow_multilines = False
 # 光标指向下一个字符，而非当前字符
 while ch := inputwindow.wait_char():
         if ch == SpecialKey.LEFT:
@@ -232,33 +269,68 @@ while ch := inputwindow.wait_char():
                         real_point = inputwindow.get_point()
                         inputwindow.add_point(-1)
                         content_list.pop(real_point - 1)
-                        inputwindow.put(content_list, move_cur=False)
+                        inputwindow.put(
+                                content_list,
+                                move_cur=False,
+                                move_real_point=False)
                         highlight()
                 else:
                         pass
         elif ch == SpecialKey.UP and last_contents != [] and last_contents_point > 0:
                 last_contents_point -= 1
+                len_ = len(last_contents[last_contents_point].splitlines())
+                if len_ > 1:
+                        allow_multilines = True
+                else:
+                        allow_multilines = False
+                inputwindow.add_begin_y(len_ - inputwindow.get_height())
                 inputwindow.put(last_contents[last_contents_point])
         elif (ch == SpecialKey.DOWN
               and last_contents != []):
                 if last_contents_point < len(last_contents) - 1:
                         last_contents_point += 1
+                        len_ = len(last_contents[last_contents_point].splitlines())
+                        if len_ > 1:
+                                allow_multilines = True
+                        else:
+                                allow_multilines = False
+                        inputwindow.add_begin_y(len_ - inputwindow.get_height())
                         inputwindow.put(last_contents[last_contents_point])
                 elif last_contents_point == len(last_contents) - 1:
+                        allow_multilines = False
                         last_contents_point += 1
                         inputwindow.clear()
                 else:
                         pass
         elif ch == SpecialKey.ENTER or ch == '\n':
                 content = inputwindow.get_content()
-                if content != '':
-                        current_outputwindow_content = (
-                                process_content(content, current_outputwindow_content))
-                        inputwindow.clear()
-                        last_contents.append(content)
-                        last_contents_point += 1
-                else:
-                        pass
+                if len(content) != 0:
+                        if content[-1] == '\\' and allow_multilines:
+                                multilines_cache = content[1:-1]
+                                current_outputwindow_content = (
+                                        process_content(
+                                                multilines_cache,
+                                                current_outputwindow_content,
+                                                True))
+                                inputwindow.clear()
+                                last_contents.append(content)
+                                last_contents_point += 1
+                                inputwindow.set_begin_y(0)
+                                allow_multilines = False
+                        elif content[0] == '\\':
+                                allow_multilines = True
+                                inputwindow.add_begin_y(1)
+                                inputwindow.add('\n')
+                        elif allow_multilines:
+                                inputwindow.insert(inputwindow.get_point(), '\n')
+                        else:
+                                current_outputwindow_content = (
+                                        process_content(content, 
+                                                        current_outputwindow_content,
+                                                        False))
+                                inputwindow.clear()
+                                last_contents.append(content)
+                                last_contents_point += 1
         elif ch == '(':
                 inputwindow.insert(inputwindow.get_point(), "()")
                 inputwindow.add_point(1)

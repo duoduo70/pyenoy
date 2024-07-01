@@ -260,6 +260,24 @@ class Window:
         __real_point    = 0  # 可作用于 Content 的编辑指针
         # 有两个指针是为了解决 CJK 字符在终端中显示为两字符宽度的问题
 
+        def add_begin_y(self, add: int):
+                self.__begin_y += add
+                self.__curses_window.mvwin(
+                        Window.__reverse_pos(
+                                Screen.get_height(),
+                                self.__begin_y
+                        ), self.__begin_x)
+                self.__curses_window.resize(self.get_height(), self.get_width())
+        
+        def set_begin_y(self, begin_y):
+                self.__begin_y = begin_y
+                self.__curses_window.resize(self.get_height(), self.get_width())
+                self.__curses_window.mvwin(
+                        Window.__reverse_pos(
+                                Screen.get_height(),
+                                self.__begin_y
+                        ), self.__begin_x)
+
         def __reverse_pos(field_len, pos_weight: int):
                 '''
                 Example:
@@ -329,13 +347,21 @@ class Window:
                 window.__curses_window = curses_window
                 return window
 
-        def put(self, text, x = 0, y = 0, refresh=True, move_cur=True):
+        def put(
+                        self,
+                        text,
+                        x = 0, y = 0,
+                        refresh=True,
+                        move_cur=True,
+                        move_real_point = True):
                 if type(text) == list:
                         text = "".join(text)
 
                 if not move_cur:
-                        cur_x, cur_y = self.len_to_xy(self.__display_point)
+                        cur_x, cur_y = self.content_len_to_xy(self.__real_point)
 
+                if move_real_point:
+                        self.__real_point = len(text)
                 self.__curses_window.clear()
                 self.__curses_window.addstr(y, x, text)
                 self.__content = text
@@ -382,20 +408,10 @@ class Window:
                 else:
                         self.__real_point = real_point
 
-                self.__display_point = str_display_len(self.__content[:real_point])
+                x, y = self.content_len_to_xy(self.__real_point)
 
-                x, y = self.len_to_xy(self.__display_point)
-                self.__curses_window.move(y, x)
-
-        def __just_add_display_point(self, len_):
-                if len_ >= 0:
-                        self.__display_point += str_display_len(
-                                self.__content[self.__real_point : self.__real_point + len_]
-                        )
-                else:
-                        self.__display_point -= str_display_len(
-                                self.__content[self.__real_point + len_ : self.__real_point]
-                        )
+                self.__display_point = self.xy_to_len(x, y)
+                self.move_to(x, y)
 
         def add_point(self, len_):
                 """
@@ -405,12 +421,12 @@ class Window:
                 if self.__real_point + len_ < 0:
                         len_ = self.__real_point
 
-                self.__just_add_display_point(len_)
-
                 self.__real_point += len_
 
-                x, y = self.len_to_xy(self.__display_point)
-                self.__curses_window.move(y, x)
+                x, y = self.content_len_to_xy(self.__real_point)
+
+                self.__display_point = self.xy_to_len(x, y)
+                self.move_to(x, y)
 
         def get_display_point(self):
                 return self.__display_point
@@ -444,6 +460,24 @@ class Window:
                         y = len_ // self.get_width()
                         x = len_ % self.get_width()
                         return x, y
+        
+        def content_len_to_xy(self, len_):
+                maxwidth = self.get_width()
+                nowwidth = 0
+                nowlines = 0
+                for i, ch in enumerate(self.__content):
+                        if i == len_:
+                                break
+                        if ch == '\n':
+                                nowwidth = 0
+                                nowlines += 1
+                        else:
+                                nowwidth += char_display_wide(ch)
+
+                        if nowwidth == maxwidth:
+                                nowwidth = 0
+                                nowlines += 1
+                return (nowwidth, nowlines)
 
         def xy_to_len(self, x, y):
                 if x == 0:
@@ -477,7 +511,7 @@ class Window:
         def insert(self, index, str_or_can_be_str: str | Any):
                 contentlist = list(self.__content)
                 contentlist.insert(index, str(str_or_can_be_str))
-                self.put("".join(contentlist), 0, 0)
+                self.put("".join(contentlist), 0, 0, move_real_point=False)
 
         def move_to(self, x, y, refresh=True):
                 '''
